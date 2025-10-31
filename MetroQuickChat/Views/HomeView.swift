@@ -3,9 +3,6 @@ import SwiftUI
 @MainActor
 struct HomeView: View {
     @State private var nickname: String = UserDefaults.standard.string(forKey: "nickname") ?? RandomNickname.generate()
-    @State private var quickChannel: Channel? = nil
-    @State private var quickManager: ChannelManager? = nil
-    @State private var showJoinTimeout: Bool = false
     @State private var showCreateChannel: Bool = false
     
     // 共享的 ChannelManager 实例，确保数据一致性
@@ -111,18 +108,6 @@ struct HomeView: View {
             .navigationDestination(isPresented: $showCreateChannel) {
                 ChannelCreateView(nickname: nickname, existingManager: sharedChannelManager)
             }
-            .background(
-                NavigationLink(destination: Group {
-                    if let ch = quickChannel, let mgr = quickManager { ChatView(channel: ch, channelManager: mgr) }
-                }, isActive: Binding(get: { quickChannel != nil }, set: { if !$0 { quickChannel = nil } })) { EmptyView() }
-                    .opacity(0)
-            )
-            .alert("未发现频道", isPresented: $showJoinTimeout) {
-                Button("重试") { startQuickJoin() }
-                Button("取消", role: .cancel) { }
-            } message: {
-                Text("请确认另一台手机已作为房主创建频道并正在广播。")
-            }
         }
         .onAppear { 
             saveNicknameIfNeeded()
@@ -158,36 +143,6 @@ struct HomeView: View {
     private func saveNicknameIfNeeded() {
         if UserDefaults.standard.string(forKey: "nickname") == nil {
             UserDefaults.standard.set(nickname, forKey: "nickname")
-        }
-    }
-
-    private func startQuickHost() {
-        let peer = Peer(nickname: nickname, isHost: true)
-        let manager = ChannelManager(central: BluetoothCentralManager(), peripheral: BluetoothPeripheralManager(), selfPeer: peer)
-        manager.createChannel(name: "测试频道")
-        manager.advertiseChannel()
-        quickManager = manager
-        quickChannel = manager.currentChannel
-    }
-
-    private func startQuickJoin() {
-        let peer = Peer(nickname: nickname)
-        let manager = ChannelManager(central: BluetoothCentralManager(), peripheral: BluetoothPeripheralManager(), selfPeer: peer)
-        quickManager = manager
-        manager.startDiscovery()
-        // 在 5 秒内轮询发现的频道，找到即加入
-        Task { @MainActor in
-            for _ in 0..<10 {
-                if let first = manager.channels.first {
-                    manager.joinChannel(first)
-                    quickChannel = first
-                    Haptics.light()
-                    return
-                }
-                try? await Task.sleep(nanoseconds: 500_000_000)
-            }
-            Haptics.warning()
-            showJoinTimeout = true
         }
     }
 }

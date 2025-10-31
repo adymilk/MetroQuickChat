@@ -204,7 +204,7 @@ private struct MessageFileRow: View {
                                 .foregroundStyle(.secondary)
                         }
                         
-                        Text(item.createdAt, style: .relative)
+                        Text(formatTime(item.createdAt))
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                         
@@ -246,6 +246,30 @@ private struct MessageFileRow: View {
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: size)
+    }
+    
+    private func formatTime(_ date: Date) -> String {
+        let calendar = Calendar.current
+        let now = Date()
+        
+        if calendar.isDateInToday(date) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm"
+            formatter.locale = Locale(identifier: "zh_CN")
+            return formatter.string(from: date)
+        } else if calendar.isDateInYesterday(date) {
+            return "昨天"
+        } else if calendar.dateInterval(of: .weekOfYear, for: now)?.contains(date) ?? false {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "EEEE HH:mm"
+            formatter.locale = Locale(identifier: "zh_CN")
+            return formatter.string(from: date)
+        } else {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "M月d日 HH:mm"
+            formatter.locale = Locale(identifier: "zh_CN")
+            return formatter.string(from: date)
+        }
     }
 }
 

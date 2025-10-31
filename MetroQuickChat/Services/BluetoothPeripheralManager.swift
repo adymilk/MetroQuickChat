@@ -23,7 +23,7 @@ final class BluetoothPeripheralManager: NSObject, ObservableObject {
         peripheral = CBPeripheralManager(delegate: self, queue: .main)
     }
 
-    func startAdvertising(localName: String) {
+    func startAdvertising(localName: String, hostNickname: String? = nil, hostDeviceId: UUID? = nil) {
         // 如果状态未知，等待状态更新
         if peripheral.state == .unknown {
             print("BluetoothPeripheralManager: 蓝牙状态未知，等待初始化完成...")
@@ -74,7 +74,16 @@ final class BluetoothPeripheralManager: NSObject, ObservableObject {
         if messageCharacteristic == nil {
             setupService()
         }
-        let data: [String: Any] = [CBAdvertisementDataServiceUUIDsKey: [serviceUUID], CBAdvertisementDataLocalNameKey: localName]
+        
+        // 构建广播名称：如果提供了房主信息，则包含在广播中
+        // 格式：频道名|昵称#设备ID（前8位）
+        var broadcastName = localName
+        if let nickname = hostNickname, let deviceId = hostDeviceId {
+            let shortDeviceId = deviceId.uuidString.prefix(8)
+            broadcastName = "\(localName)|\(nickname)#\(shortDeviceId)"
+        }
+        
+        let data: [String: Any] = [CBAdvertisementDataServiceUUIDsKey: [serviceUUID], CBAdvertisementDataLocalNameKey: broadcastName]
         peripheral.startAdvertising(data)
         state = .advertising
     }

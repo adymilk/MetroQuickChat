@@ -26,7 +26,7 @@ final class BluetoothCentralManager: NSObject, ObservableObject {
 
     let incomingDataSubject = PassthroughSubject<Data, Never>()
     let connectionEventSubject = PassthroughSubject<CentralState, Never>()
-    let discoveredSubject = PassthroughSubject<(UUID, String), Never>()
+    let discoveredSubject = PassthroughSubject<(UUID, String, String?, UUID?), Never>() // (identifier, channelName, hostNickname, hostDeviceId)
 
     private let serviceUUID = CBUUID(string: "12345678-1234-1234-1234-1234567890AB")
     private let characteristicUUID = CBUUID(string: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
@@ -171,9 +171,40 @@ extension BluetoothCentralManager: CBCentralManagerDelegate {
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             self.idToPeripheral[peripheral.identifier] = peripheral
-            let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? (peripheral.name ?? "未知频道")
-            print("BluetoothCentralManager: 频道名称 - \(name)")
-            self.discoveredSubject.send((peripheral.identifier, name))
+            let rawName = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? (peripheral.name ?? "未知频道")
+            
+            // 解析广播名称：格式为 "频道名|昵称#设备ID" 或 "频道名"
+            var channelName = rawName
+            var hostNickname: String? = nil
+            var hostDeviceId: UUID? = nil
+            
+            if let pipeIndex = rawName.firstIndex(of: "|") {
+                // 包含房主信息
+                channelName = String(rawName[..<pipeIndex])
+                let hostInfo = String(rawName[rawName.index(after: pipeIndex)...])
+                
+                // 解析昵称和设备ID：格式 "昵称#设备ID前8位"
+                if let hashIndex = hostInfo.firstIndex(of: "#") {
+                    hostNickname = String(hostInfo[..<hashIndex])
+                    let deviceIdString = String(hostInfo[hostInfo.index(after: hashIndex)...])
+                    // 尝试从8位短码恢复完整UUID（如果不能恢复，就使用短码创建UUID）
+                    // 注意：BLE广播的限制，我们只能存储8位，所以用这个作为设备标识的一部分
+                    // 实际使用中，我们需要完整的UUID，但可以通过其他方式获取
+                    // 这里先解析出8位，后续可以从连接后的消息中获取完整信息
+                    if let uuid = UUID(uuidString: deviceIdString) {
+                        hostDeviceId = uuid
+                    } else {
+                        // 如果不能直接解析为UUID，创建一个基于短码的UUID
+                        // 但这只是为了存储，真正的设备ID应该从后续通信中获取
+                        print("BluetoothCentralManager: 设备ID短码: \(deviceIdString)")
+                    }
+                } else {
+                    hostNickname = hostInfo
+                }
+            }
+            
+            print("BluetoothCentralManager: 频道名称 - \(channelName), 房主: \(hostNickname ?? "未知"), 设备ID: \(hostDeviceId?.uuidString.prefix(8) ?? "未知")")
+            self.discoveredSubject.send((peripheral.identifier, channelName, hostNickname, hostDeviceId))
         }
     }
 

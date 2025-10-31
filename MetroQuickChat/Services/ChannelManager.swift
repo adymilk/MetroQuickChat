@@ -50,7 +50,7 @@ final class ChannelManager: ObservableObject {
 
         central.discoveredSubject
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] (identifier, name) in
+            .sink { [weak self] (identifier, name, hostNickname, hostDeviceId) in
                 guard let self else { return }
                 var isNewChannel = false
                 
@@ -59,20 +59,39 @@ final class ChannelManager: ObservableObject {
                     // 更新现有频道的信息和发现时间
                     self.channels[idx].name = name
                     self.channels[idx].lastDiscoveredAt = Date()
+                    // 如果之前没有房主信息，现在有了，更新它
+                    if !self.channels[idx].hasValidHostInfo {
+                        if let nickname = hostNickname, let deviceId = hostDeviceId {
+                            self.channels[idx].hostNickname = nickname
+                            self.channels[idx].hostDeviceId = deviceId
+                            print("ChannelManager: 更新频道房主信息 - \(name): \(nickname)")
+                        }
+                    }
                 } else {
-                    // 创建新频道，记录发现时间
-                    let channel = Channel(name: name, hostPeerId: identifier, discoveryId: identifier, lastDiscoveredAt: Date())
+                    // 创建新频道，使用广播中的房主信息
+                    let channel = Channel(
+                        name: name,
+                        hostPeerId: identifier, // 使用identifier作为hostPeerId（蓝牙设备ID）
+                        hostNickname: hostNickname,
+                        hostDeviceId: hostDeviceId,
+                        discoveryId: identifier,
+                        lastDiscoveredAt: Date()
+                    )
                     self.channels.append(channel)
-                    isNewChannel = true
                     
-                    // 触发新频道发现事件（用于通知和震动）
-                    self.events.send(.channelDiscovered(channel))
-                    
-                    // 发送通知和触发震动
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        Haptics.success()
-                        NotificationService.shared.notifyChannelDiscovered(channel)
+                    // 如果房主信息无效，标记并稍后清理（不会触发通知）
+                    if !channel.hasValidHostInfo {
+                        print("ChannelManager: ⚠️ 发现频道但缺少房主信息: \(name)，将在清理周期中移除")
+                    } else {
+                        // 只有有效房主信息才触发新频道发现事件
+                        self.events.send(.channelDiscovered(channel))
+                        
+                        // 发送通知和触发震动
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            Haptics.success()
+                            NotificationService.shared.notifyChannelDiscovered(channel)
+                        }
                     }
                 }
                 self.events.send(.channelsUpdated(self.channels))
@@ -99,19 +118,43 @@ final class ChannelManager: ObservableObject {
                 let expiredThreshold: TimeInterval = 300 // 5分钟
                 
                 // 移除超过5分钟未发现且不在当前频道的频道
+                // 同时移除所有没有有效房主信息的频道（未知房主）
                 let beforeCount = self.channels.count
+                var channelsToRemove: [Channel] = []
+                
                 self.channels.removeAll { channel in
                     // 如果是当前频道，不移除
                     if channel.id == self.currentChannel?.id {
                         return false
                     }
-                    // 如果超过5分钟未发现，移除
+                    
+                    // 如果没有有效房主信息，标记为待移除（未知房主）
+                    if !channel.hasValidHostInfo {
+                        print("ChannelManager: 移除未知房主的频道 - \(channel.name)")
+                        channelsToRemove.append(channel)
+                        return true
+                    }
+                    
+                    // 如果超过5分钟未发现，标记为待移除
                     if let lastDiscovered = channel.lastDiscoveredAt,
                        now.timeIntervalSince(lastDiscovered) > expiredThreshold {
-                        print("ChannelManager: 移除过期频道 \(channel.name) (最后发现: \(now.timeIntervalSince(lastDiscovered))秒前)")
+                        channelsToRemove.append(channel)
                         return true
                     }
                     return false
+                }
+                
+                // 对于要移除的频道，如果未收藏则删除全部数据
+                for channel in channelsToRemove {
+                    let isFavorite = self.store.isFavoriteChannel(channelId: channel.id)
+                    if !isFavorite {
+                        // 未收藏的频道，删除全部数据
+                        print("ChannelManager: 删除未收藏频道的数据 - \(channel.name) (ID: \(channel.id.uuidString.prefix(8)))")
+                        self.store.clearChannelMessages(channelId: channel.id)
+                    } else {
+                        // 已收藏的频道，保留数据，只打印日志
+                        print("ChannelManager: 移除过期频道但保留数据（已收藏）- \(channel.name)")
+                    }
                 }
                 
                 if self.channels.count != beforeCount {
@@ -125,7 +168,17 @@ final class ChannelManager: ObservableObject {
     }
 
     func createChannel(name: String) {
-        let channel = Channel(name: name, hostPeerId: selfPeer.id, lastDiscoveredAt: Date())
+        // 获取设备唯一标识符
+        let deviceId = DeviceIdentifier.deviceId()
+        let fullNickname = DeviceIdentifier.fullUserIdentifier(nickname: selfPeer.nickname)
+        
+        let channel = Channel(
+            name: name,
+            hostPeerId: selfPeer.id,
+            hostNickname: fullNickname,
+            hostDeviceId: deviceId,
+            lastDiscoveredAt: Date()
+        )
         channels.append(channel)
         peers = [Peer(id: selfPeer.id, nickname: selfPeer.nickname, isHost: true)]
         currentChannel = channel
@@ -136,6 +189,7 @@ final class ChannelManager: ObservableObject {
         
         // 使用 Task 延迟执行，避免在视图更新期间修改状态
         Task { @MainActor in
+            // 广播时传入房主信息
             advertiseChannel()
             sendSystem("频道创建成功：\(name)")
             startPresenceLoop()
@@ -234,7 +288,30 @@ final class ChannelManager: ObservableObject {
     /// 获取房主信息
     func getHostPeer() -> Peer? {
         guard let channel = currentChannel else { return nil }
-        return peers.first(where: { $0.id == channel.hostPeerId })
+        
+        // 首先尝试从 peers 列表中查找
+        if let peer = peers.first(where: { $0.id == channel.hostPeerId }) {
+            return peer
+        }
+        
+        // 如果 peers 中没有，但频道有房主信息，创建一个虚拟的 Peer 用于显示
+        if let hostNickname = channel.hostNickname, channel.hasValidHostInfo {
+            // 解析完整昵称（格式：昵称#设备ID）
+            let displayName: String
+            if let hashIndex = hostNickname.firstIndex(of: "#") {
+                displayName = String(hostNickname[..<hashIndex])
+            } else {
+                displayName = hostNickname
+            }
+            
+            return Peer(
+                id: channel.hostPeerId,
+                nickname: displayName,
+                isHost: true
+            )
+        }
+        
+        return nil
     }
     
     /// 检查当前用户是否是房主
@@ -411,8 +488,15 @@ final class ChannelManager: ObservableObject {
     }
 
     func advertiseChannel() {
-        let name = currentChannel?.name ?? selfPeer.nickname
-        peripheral.startAdvertising(localName: name)
+        guard let channel = currentChannel else {
+            peripheral.startAdvertising(localName: selfPeer.nickname)
+            return
+        }
+        
+        // 广播时包含房主信息（昵称和设备ID）
+        let hostNickname = channel.hostNickname ?? DeviceIdentifier.fullUserIdentifier(nickname: selfPeer.nickname)
+        let hostDeviceId = channel.hostDeviceId ?? DeviceIdentifier.deviceId()
+        peripheral.startAdvertising(localName: channel.name, hostNickname: hostNickname, hostDeviceId: hostDeviceId)
     }
 
     func startDiscovery() {

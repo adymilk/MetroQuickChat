@@ -391,11 +391,27 @@ final class LocalStore {
                         if let attachment = message.attachment {
                             if attachment.kind == .image {
                                 imageSize += messageSize
-                                // 附件大小通过文件系统读取，这里只计算元数据
+                                // 计算 base64 解码后的实际数据大小
+                                if let data = Data(base64Encoded: attachment.dataBase64) {
+                                    imageSize += Int64(data.count)
+                                }
+                                // 如果还有缩略图，也计算大小
+                                if let thumbnailBase64 = attachment.thumbnailBase64,
+                                   let thumbData = Data(base64Encoded: thumbnailBase64) {
+                                    imageSize += Int64(thumbData.count)
+                                }
                                 imageMessageCount += 1
                             } else if attachment.kind == .video {
                                 videoSize += messageSize
-                                // 附件大小通过文件系统读取，这里只计算元数据
+                                // 计算 base64 解码后的实际数据大小
+                                if let data = Data(base64Encoded: attachment.dataBase64) {
+                                    videoSize += Int64(data.count)
+                                }
+                                // 如果还有缩略图，也计算大小
+                                if let thumbnailBase64 = attachment.thumbnailBase64,
+                                   let thumbData = Data(base64Encoded: thumbnailBase64) {
+                                    videoSize += Int64(thumbData.count)
+                                }
                                 videoMessageCount += 1
                             }
                         }
@@ -533,6 +549,85 @@ final class LocalStore {
     func loadMessage(for item: MessageFileItem) -> Message? {
         let messages = loadMessages(channelId: item.channelId)
         return messages.first { $0.id == item.messageId }
+    }
+    
+    // MARK: - Data Cleanup
+    
+    /// 清理错误和无效的数据文件
+    /// 返回：(清理的文件数量, 释放的存储空间)
+    func cleanupInvalidData() -> (removedFiles: Int, freedSpace: Int64) {
+        var removedCount = 0
+        var freedSpace: Int64 = 0
+        
+        // 获取所有文件
+        guard let files = try? fileManager.contentsOfDirectory(at: baseURL, includingPropertiesForKeys: [.fileSizeKey], options: []) else {
+            return (0, 0)
+        }
+        
+        // 获取所有有效的频道 ID（从收藏列表和有消息的频道）
+        let favoriteChannelIds = Set(loadFavoriteChannels().map { $0.id })
+        let validChannelIds = Set(getAllChannelIds())
+        let allValidChannelIds = favoriteChannelIds.union(validChannelIds)
+        
+        for fileURL in files {
+            let fileName = fileURL.lastPathComponent
+            
+            // 跳过目录
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDirectory), !isDirectory.boolValue else { continue }
+            
+            // 检查是否是消息文件
+            if fileName.hasPrefix("messages_") && fileName.hasSuffix(".json") {
+                let uuidString = String(fileName.dropFirst("messages_".count).dropLast(".json".count))
+                guard let channelId = UUID(uuidString: uuidString) else {
+                    // 无效的 UUID，删除
+                    if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                        freedSpace += Int64(size)
+                    }
+                    try? fileManager.removeItem(at: fileURL)
+                    removedCount += 1
+                    print("LocalStore: 删除无效的消息文件（UUID格式错误）: \(fileName)")
+                    continue
+                }
+                
+                // 尝试加载并验证消息文件
+                do {
+                    let data = try Data(contentsOf: fileURL)
+                    let messages = try decoder.decode([Message].self, from: data)
+                    
+                    // 如果文件为空或无效，且频道不在有效列表中，删除
+                    if messages.isEmpty && !allValidChannelIds.contains(channelId) {
+                        if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                            freedSpace += Int64(size)
+                        }
+                        try? fileManager.removeItem(at: fileURL)
+                        messageCache.removeValue(forKey: channelId)
+                        removedCount += 1
+                        print("LocalStore: 删除空消息文件: \(fileName)")
+                    }
+                } catch {
+                    // 文件损坏或无法解析，删除
+                    if let size = try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                        freedSpace += Int64(size)
+                    }
+                    try? fileManager.removeItem(at: fileURL)
+                    messageCache.removeValue(forKey: channelId)
+                    removedCount += 1
+                    print("LocalStore: 删除损坏的消息文件: \(fileName) - 错误: \(error.localizedDescription)")
+                }
+            } else if fileName != "favorite_channels.json" {
+                // 未知文件类型（除了收藏列表文件），检查是否需要清理
+                // 这里可以扩展更多清理逻辑
+            }
+        }
+        
+        // 清理缓存中的无效条目
+        messageCache = messageCache.filter { channelId, _ in
+            allValidChannelIds.contains(channelId) || fileManager.fileExists(atPath: baseURL.appendingPathComponent("messages_\(channelId.uuidString).json").path)
+        }
+        
+        print("LocalStore: 清理完成 - 删除 \(removedCount) 个文件，释放 \(DeviceStorageInfo.formattedSize(freedSpace))")
+        return (removedCount, freedSpace)
     }
 }
 

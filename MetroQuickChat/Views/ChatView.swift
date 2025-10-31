@@ -480,6 +480,15 @@ struct ChatView: View {
         return viewModel.peers.first { $0.id == userId }
     }
     
+    // MARK: - Time Formatting
+    
+    private func formatTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        formatter.locale = Locale(identifier: "zh_CN")
+        return formatter.string(from: date)
+    }
+    
     // MARK: - Member Avatars Preview
     
     private var memberAvatarsPreview: some View {
@@ -595,7 +604,7 @@ private struct MessageBubbleView: View {
                         
                         // Timestamp and read receipt - inside bubble, bottom right
                         HStack(spacing: 3) {
-                            Text(message.createdAt, style: .time)
+                            Text(formatTime24H(message.createdAt))
                                 .font(.system(size: 12))
                                 .foregroundStyle(isOutgoing ? .white.opacity(0.9) : .secondary)
                             
@@ -732,6 +741,14 @@ private struct MessageBubbleView: View {
                 .foregroundStyle(.secondary)
         }
     }
+    
+    // 24小时制时间格式化
+    private func formatTime24H(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        formatter.locale = Locale(identifier: "zh_CN")
+        return formatter.string(from: date)
+    }
 }
 
 // MARK: - Supporting Views
@@ -744,64 +761,107 @@ private struct Err: Identifiable {
 private struct MembersSheet: View {
     @ObservedObject var viewModel: ChatViewModel
     @State private var toKick: UUID? = nil
+    
+    /// 获取所有应该显示的成员（包括房主）
+    private var allMembers: [Peer] {
+        var members = viewModel.peers
+        
+        // 如果 peers 为空或没有房主，确保包含房主信息
+        let hostPeer = viewModel.getHostPeer()
+        if let host = hostPeer {
+            // 如果房主不在 peers 列表中，添加房主
+            if !members.contains(where: { $0.id == host.id }) {
+                members.insert(host, at: 0) // 房主放在最前面
+            }
+        }
+        
+        // 如果仍然为空且当前用户是房主，至少显示自己
+        if members.isEmpty {
+            let selfPeer = viewModel.channelManager.selfPeer
+            members.append(Peer(
+                id: selfPeer.id,
+                nickname: selfPeer.nickname,
+                isHost: selfPeer.isHost,
+                latitude: viewModel.locationProvider.location?.coordinate.latitude,
+                longitude: viewModel.locationProvider.location?.coordinate.longitude,
+                lastUpdatedAt: Date()
+            ))
+        }
+        
+        return members
+    }
 
     var body: some View {
         NavigationStack {
-            List(viewModel.peers) { peer in
-                HStack(spacing: 12) {
-                    // 随机头像
-                    AvatarView(nickname: peer.nickname, size: 44)
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Text(peer.nickname)
-                                .font(.headline)
-                            if peer.isHost {
-                                Text("房主")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.blue.opacity(0.2))
-                                    .cornerRadius(4)
+            if allMembers.isEmpty {
+                // 空状态（理论上不应该出现）
+                VStack(spacing: 16) {
+                    Image(systemName: "person.3.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.secondary)
+                    Text("暂无成员")
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .navigationTitle("成员")
+            } else {
+                List(allMembers) { peer in
+                    HStack(spacing: 12) {
+                        // 随机头像
+                        AvatarView(nickname: peer.nickname, size: 44)
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Text(peer.nickname)
+                                    .font(.headline)
+                                if peer.isHost {
+                                    Text("房主")
+                                        .font(.caption2)
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.blue)
+                                        .cornerRadius(4)
+                                }
+                            }
+                            
+                            HStack(spacing: 8) {
+                                // 距离
+                                if let distanceText = viewModel.distanceText(for: peer) {
+                                    Label(distanceText, systemImage: "location")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                
+                                // 在线时长
+                                if let onlineDuration = viewModel.onlineDurationText(for: peer) {
+                                    Label(onlineDuration, systemImage: "clock")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                
+                                if let bearingText = viewModel.bearingText(for: peer) {
+                                    Text(bearingText)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                         
-                        HStack(spacing: 8) {
-                            // 距离
-                            if let distanceText = viewModel.distanceText(for: peer) {
-                                Label(distanceText, systemImage: "location")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            
-                            // 在线时长
-                            if let onlineDuration = viewModel.onlineDurationText(for: peer) {
-                                Label(onlineDuration, systemImage: "clock")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            
-                            if let bearingText = viewModel.bearingText(for: peer) {
-                                Text(bearingText)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
+                        Spacer()
+                        
+                        if peer.isHost == false && viewModel.isHost {
+                            Button(role: .destructive) {
+                                toKick = peer.id
+                                viewModel.kick(peer.id)
+                            } label: { Text("踢出") }
                         }
                     }
-                    
-                    Spacer()
-                    
-                    if peer.isHost == false && viewModel.isHost {
-                        Button(role: .destructive) {
-                            toKick = peer.id
-                            viewModel.kick(peer.id)
-                        } label: { Text("踢出") }
-                    }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
+                .navigationTitle("成员 (\(allMembers.count))")
             }
-            .navigationTitle("成员 (\(viewModel.peers.count))")
         }
     }
 }

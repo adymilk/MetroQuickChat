@@ -76,7 +76,7 @@ public final class MeshRelayManager: ObservableObject, MeshRelayManagerProtocol 
         // Listen for discovered peripherals
         central.discoveredSubject
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] (identifier, name) in
+            .sink { [weak self] (identifier, name, hostNickname, hostDeviceId) in
                 self?.handleDiscoveredNode(identifier: identifier, name: name)
             }
             .store(in: &cancellables)

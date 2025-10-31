@@ -8,6 +8,8 @@ struct SettingsView: View {
     @State private var showClearAlert = false
     @State private var clearAction: ClearAction?
     @State private var selectedFileType: MessageFileItem.FileType?
+    @State private var showCleanupToast = false
+    @State private var cleanupToastText = ""
     
     enum ClearAction {
         case messages
@@ -126,6 +128,17 @@ struct SettingsView: View {
             
             // 清理选项
             Section {
+                Button {
+                    cleanupInvalidData()
+                } label: {
+                    HStack {
+                        Image(systemName: "checkmark.circle")
+                        Text("清理错误数据")
+                    }
+                }
+                
+                Divider()
+                
                 Button(role: .destructive) {
                     clearAction = .messages
                     showClearAlert = true
@@ -148,7 +161,7 @@ struct SettingsView: View {
             } header: {
                 Text("数据清理")
             } footer: {
-                Text("清理操作无法恢复，请谨慎操作")
+                Text("清理错误数据：自动删除无效和损坏的文件。清理所有消息/数据操作无法恢复，请谨慎操作")
             }
         }
         .navigationTitle("设置")
@@ -175,6 +188,7 @@ struct SettingsView: View {
                 Text("将删除所有数据，包括消息、频道记录和收藏列表。此操作无法恢复。")
             }
         }
+        .toast(isPresented: $showCleanupToast, text: cleanupToastText)
     }
     
     private func analyzeStorage() {
@@ -189,6 +203,40 @@ struct SettingsView: View {
             
             storageAnalysis = analysis
             isAnalyzing = false
+        }
+    }
+    
+    private func cleanupInvalidData() {
+        Haptics.light()
+        isAnalyzing = true
+        
+        Task { @MainActor in
+            let (removedFiles, freedSpace) = await Task.detached { [store = channelManager.store] in
+                return store.cleanupInvalidData()
+            }.value
+            
+            isAnalyzing = false
+            
+            if removedFiles > 0 {
+                cleanupToastText = "已清理 \(removedFiles) 个错误文件，释放 \(DeviceStorageInfo.formattedSize(freedSpace))"
+                Haptics.success()
+            } else {
+                cleanupToastText = "未发现错误数据"
+                Haptics.light()
+            }
+            
+            showCleanupToast = true
+            
+            // 重新分析存储
+            analyzeStorage()
+            
+            // 自动隐藏提示
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                await MainActor.run {
+                    showCleanupToast = false
+                }
+            }
         }
     }
     

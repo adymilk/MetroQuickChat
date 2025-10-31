@@ -486,7 +486,7 @@ private struct DemoMessageBubbleView: View {
     
     private var timestampView: some View {
         HStack(spacing: 3) {
-            Text(message.createdAt, style: .time)
+            Text(formatTime(message.createdAt))
                 .font(.system(size: 12))
                 .foregroundStyle(isOutgoing ? .white.opacity(0.9) : .secondary)
             
@@ -575,6 +575,13 @@ private struct DemoMessageBubbleView: View {
             Text("未知消息类型")
                 .foregroundStyle(.secondary)
         }
+    }
+    
+    private func formatTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        formatter.locale = Locale(identifier: "zh_CN")
+        return formatter.string(from: date)
     }
 }
 

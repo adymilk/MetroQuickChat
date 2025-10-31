@@ -15,22 +15,9 @@ final class ChannelListViewModel: ObservableObject {
     init(channelManager: ChannelManager, defaultNickname: String) {
         self.channelManager = channelManager
         self.nickname = defaultNickname
-        // 如果 manager 中已有频道，使用它们；否则添加示例频道
-        if channelManager.channels.isEmpty {
-            addDemoChannel()
-        } else {
-            channels = channelManager.channels
-        }
+        // 直接使用真实扫描到的频道，不添加任何假数据
+        channels = channelManager.channels
         bind()
-    }
-    
-    private func addDemoChannel() {
-        let demoChannel = Channel(
-            name: RandomChannelName.generate(),
-            hostPeerId: UUID(),
-            createdAt: Date()
-        )
-        channels = [demoChannel]
     }
 
     private func bind() {
@@ -41,13 +28,8 @@ final class ChannelListViewModel: ObservableObject {
                 guard let self = self else { return }
                 switch event {
                 case .channelsUpdated(let channels):
-                    // 优先使用真实扫描到的频道
-                    if !channels.isEmpty {
-                        self.channels = channels
-                    } else if self.channels.isEmpty {
-                        // 只有在完全没有频道时才添加示例频道
-                        self.addDemoChannel()
-                    }
+                    // 直接使用真实扫描到的频道，不添加任何假数据
+                    self.channels = channels
                 case .joined(let channel, _):
                     self.didJoinChannel.send(channel)
                 case .error(let message):
@@ -64,13 +46,8 @@ final class ChannelListViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] channels in
                 guard let self = self else { return }
-                // 直接使用 channelManager 的真实频道列表
-                // 如果为空且当前也没有频道，才添加示例频道
-                if !channels.isEmpty {
-                    self.channels = channels
-                } else if self.channels.isEmpty {
-                    self.addDemoChannel()
-                }
+                // 直接使用 channelManager 的真实频道列表，不添加假数据
+                self.channels = channels
             }
             .store(in: &cancellables)
     }

@@ -25,6 +25,19 @@ final class ChatViewModel: ObservableObject {
         self.channelManager = channelManager
         self.channel = channel
         self.selfPeerId = channelManager.selfPeerId
+        // 初始化 peers 列表：先使用 ChannelManager 的 peers，确保至少包含当前用户
+        self.peers = channelManager.peers
+        if !self.peers.contains(where: { $0.id == selfPeerId }) {
+            let selfPeer = channelManager.selfPeer
+            self.peers.append(Peer(
+                id: selfPeer.id,
+                nickname: selfPeer.nickname,
+                isHost: selfPeer.isHost,
+                latitude: locationProvider.location?.coordinate.latitude,
+                longitude: locationProvider.location?.coordinate.longitude,
+                lastUpdatedAt: Date()
+            ))
+        }
         bind()
         setupVoiceService()
         // Load local history
@@ -79,10 +92,32 @@ final class ChatViewModel: ObservableObject {
                     self.messages.append(message)
                 case .peersUpdated(let peers):
                     self.peers = peers
+                    // 确保当前用户始终在列表中
+                    if !self.peers.contains(where: { $0.id == self.selfPeerId }) {
+                        let selfPeer = self.channelManager.selfPeer
+                        self.peers.append(Peer(
+                            id: selfPeer.id,
+                            nickname: selfPeer.nickname,
+                            isHost: selfPeer.isHost,
+                            latitude: self.locationProvider.location?.coordinate.latitude,
+                            longitude: self.locationProvider.location?.coordinate.longitude,
+                            lastUpdatedAt: Date()
+                        ))
+                    }
                 case .joined(let channel, let peer) where channel.id == self.channel.id:
-                    if self.peers.contains(where: { $0.id == peer.id }) == false { self.peers.append(peer) }
+                    if self.peers.contains(where: { $0.id == peer.id }) == false { 
+                        self.peers.append(peer) 
+                    } else {
+                        // 更新已存在的 peer 信息
+                        if let idx = self.peers.firstIndex(where: { $0.id == peer.id }) {
+                            self.peers[idx] = peer
+                        }
+                    }
                 case .left(let channel, let peer) where channel.id == self.channel.id:
-                    self.peers.removeAll { $0.id == peer.id }
+                    // 如果是自己离开，不清除 peers（因为可能还在频道中）
+                    if peer.id != self.selfPeerId {
+                        self.peers.removeAll { $0.id == peer.id }
+                    }
                     // 只有真正是当前用户主动离开或被踢出时才触发退出
                     // 注意：切换到另一个频道时不会发送 .left 事件，所以这里只处理真正的离开
                     if peer.id == self.selfPeerId {

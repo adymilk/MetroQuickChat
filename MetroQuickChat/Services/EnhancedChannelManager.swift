@@ -73,8 +73,8 @@ final class EnhancedChannelManager: ObservableObject {
         // Channel discovery
         central.discoveredSubject
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] (identifier, name) in
-                self?.handleDiscoveredChannel(identifier: identifier, name: name)
+            .sink { [weak self] (identifier, name, hostNickname, hostDeviceId) in
+                self?.handleDiscoveredChannel(identifier: identifier, name: name, hostNickname: hostNickname, hostDeviceId: hostDeviceId)
             }
             .store(in: &cancellables)
     }
@@ -102,6 +102,10 @@ final class EnhancedChannelManager: ObservableObject {
     // MARK: - Channel Management with Sub-channel Sharding
     
     func createChannel(name: String) {
+        // 获取设备唯一标识符和完整昵称
+        let deviceId = DeviceIdentifier.deviceId()
+        let fullNickname = DeviceIdentifier.fullUserIdentifier(nickname: selfPeer.nickname)
+        
         let logicalChannel = LogicalChannel(name: name)
         logicalChannels.append(logicalChannel)
         
@@ -115,6 +119,8 @@ final class EnhancedChannelManager: ObservableObject {
             id: subChannel.id,
             name: subChannel.name,
             hostPeerId: subChannel.hostPeerId,
+            hostNickname: fullNickname,
+            hostDeviceId: deviceId,
             createdAt: subChannel.createdAt
         )
         
@@ -386,7 +392,7 @@ final class EnhancedChannelManager: ObservableObject {
     
     // MARK: - Channel Discovery
     
-    private func handleDiscoveredChannel(identifier: UUID, name: String) {
+    private func handleDiscoveredChannel(identifier: UUID, name: String, hostNickname: String?, hostDeviceId: UUID?) {
         // Parse channel name and sub-channel info from advertising data
         // Format: "ChannelName-2" or "ChannelName"
         let components = name.split(separator: "-")
@@ -396,9 +402,30 @@ final class EnhancedChannelManager: ObservableObject {
         // Find or create channel
         if let idx = channels.firstIndex(where: { $0.discoveryId == identifier }) {
             channels[idx].name = name
+            // 如果之前没有房主信息，现在有了，更新它
+            if !channels[idx].hasValidHostInfo {
+                if let nickname = hostNickname, let deviceId = hostDeviceId {
+                    channels[idx].hostNickname = nickname
+                    channels[idx].hostDeviceId = deviceId
+                    print("EnhancedChannelManager: 更新频道房主信息 - \(name): \(nickname)")
+                }
+            }
         } else {
-            let channel = Channel(name: name, hostPeerId: identifier, discoveryId: identifier)
+            // 创建新频道，使用广播中的房主信息
+            let channel = Channel(
+                name: name,
+                hostPeerId: identifier,
+                hostNickname: hostNickname,
+                hostDeviceId: hostDeviceId,
+                discoveryId: identifier,
+                lastDiscoveredAt: Date()
+            )
             channels.append(channel)
+            
+            // 如果房主信息无效，标记并稍后清理（不会触发通知）
+            if !channel.hasValidHostInfo {
+                print("EnhancedChannelManager: ⚠️ 发现频道但缺少房主信息: \(name)，将在清理周期中移除")
+            }
         }
         
         events.send(.channelsUpdated(channels))
@@ -410,8 +437,10 @@ final class EnhancedChannelManager: ObservableObject {
         guard let channel = currentChannel,
               let subChannel = currentSubChannel else { return }
         
-        // Advertise sub-channel name
-        peripheral.startAdvertising(localName: subChannel.name)
+        // 广播时包含房主信息（昵称和设备ID）
+        let hostNickname = channel.hostNickname ?? DeviceIdentifier.fullUserIdentifier(nickname: selfPeer.nickname)
+        let hostDeviceId = channel.hostDeviceId ?? DeviceIdentifier.deviceId()
+        peripheral.startAdvertising(localName: subChannel.name, hostNickname: hostNickname, hostDeviceId: hostDeviceId)
         
         // Also advertise all sub-channels in service info (for future enhancement)
         if let logicalChannel = logicalChannels.first(where: { $0.id == subChannel.logicalChannelId }) {

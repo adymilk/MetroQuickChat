@@ -132,12 +132,11 @@ struct ChannelRowView: View {
         let now = Date()
         
         if calendar.isDateInToday(date) {
+            // 24小时制格式：HH:mm
             let formatter = DateFormatter()
-            formatter.dateFormat = "h:mm a"
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            let timeString = formatter.string(from: date)
-            // 转换为小写并移除 AM/PM（简化显示）
-            return timeString.replacingOccurrences(of: " AM", with: "").replacingOccurrences(of: " PM", with: "")
+            formatter.dateFormat = "HH:mm"
+            formatter.locale = Locale(identifier: "zh_CN")
+            return formatter.string(from: date)
         } else if calendar.isDateInYesterday(date) {
             return "昨天"
         } else if calendar.dateInterval(of: .weekOfYear, for: now)?.contains(date) ?? false {

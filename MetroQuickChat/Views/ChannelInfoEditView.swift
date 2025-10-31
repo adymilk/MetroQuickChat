@@ -199,8 +199,7 @@ struct ChannelInfoEditView: View {
     
     private func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
+        formatter.dateFormat = "yyyy年M月d日 HH:mm"
         formatter.locale = Locale(identifier: "zh_CN")
         return formatter.string(from: date)
     }

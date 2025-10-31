@@ -53,6 +53,23 @@ struct FavoriteChannelsView: View {
                         )
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.visible)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                deleteFavorite(channel)
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                        }
+                        .swipeActions(edge: .leading) {
+                            Button {
+                                channelManager.unfavoriteChannel(channelId: channel.id)
+                                loadFavorites()
+                                Haptics.success()
+                            } label: {
+                                Label("取消收藏", systemImage: "star.slash")
+                            }
+                            .tint(.orange)
+                        }
                     }
                 }
                 .listStyle(.plain)
@@ -107,6 +124,19 @@ struct FavoriteChannelsView: View {
                 favoriteChannels[i].name = discovered.name // 更新名称（如果变化）
             }
         }
+    }
+    
+    private func deleteFavorite(_ channel: Channel) {
+        Haptics.warning()
+        // 取消收藏并删除数据
+        channelManager.unfavoriteChannel(channelId: channel.id)
+        // 删除频道的所有消息数据（如果不在当前频道中）
+        if channelManager.currentChannel?.id != channel.id {
+            channelManager.store.clearChannelMessages(channelId: channel.id)
+        }
+        // 重新加载收藏列表
+        loadFavorites()
+        Haptics.success()
     }
 }
 
