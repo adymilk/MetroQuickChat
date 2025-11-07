@@ -385,6 +385,11 @@ final class LocalStore {
                             voiceSize += messageSize
                             voiceSize += Int64(data.count) // 语音数据大小（真实数据）
                             voiceMessageCount += 1
+                        case .video(let data, _, _):
+                            // 视频也计入媒体大小，但可能需要单独统计
+                            imageSize += messageSize // 暂时归入 imageSize，因为都是媒体文件
+                            imageSize += Int64(data.count) // 视频数据大小（真实数据）
+                            imageMessageCount += 1 // 暂时计入图片数量
                         }
                     } else if message.attachment != nil {
                         // 旧版附件格式

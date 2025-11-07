@@ -105,6 +105,12 @@ public struct UnifiedMessage: Codable {
             payload = data.base64EncodedString()
             duration = dur
             fileSize = data.count
+            
+        case .video(let data, _, let dur):
+            type = .video
+            payload = data.base64EncodedString()
+            duration = dur
+            fileSize = data.count
         }
         
         return UnifiedMessage(
@@ -168,6 +174,8 @@ public struct UnifiedMessage: Codable {
             if let dur = duration {
                 messageType = .voice(data, duration: dur)
             }
+        case .video:
+            messageType = .video(data, thumbnail: nil, duration: duration)
         case .system:
             if let text = String(data: data, encoding: .utf8) {
                 return Message(
@@ -180,7 +188,7 @@ public struct UnifiedMessage: Codable {
                     createdAt: createdAt
                 )
             }
-        default:
+        case .routingTableSync, .subChannelInfo, .join:
             return nil
         }
         

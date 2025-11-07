@@ -566,6 +566,44 @@ private struct DemoMessageBubbleView: View {
                     duration: duration,
                     onPlay: onPlayVoice
                 )
+            case .video(let data, let thumbnail, let duration):
+                // 显示视频缩略图或占位符
+                if let thumbnailData = thumbnail, let thumbnailImage = UIImage(data: thumbnailData) {
+                    VStack(spacing: 4) {
+                        Image(uiImage: thumbnailImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 250, maxHeight: 250)
+                            .cornerRadius(8)
+                            .overlay(
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(size: 40))
+                                    .foregroundStyle(.white.opacity(0.8))
+                            )
+                        if let duration = duration {
+                            Text("🎥 视频 (\(duration)秒)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("🎥 视频")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    // 没有缩略图，显示占位符
+                    VStack(spacing: 8) {
+                        Image(systemName: "video.fill")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 100, height: 100)
+                            .background(Color(.systemGray5))
+                            .cornerRadius(8)
+                        Text("🎥 视频")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         } else if !message.text.isEmpty {
             Text(message.text)

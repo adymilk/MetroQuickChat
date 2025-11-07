@@ -16,6 +16,8 @@ final class BluetoothPeripheralManager: NSObject, ObservableObject {
 
     private var peripheral: CBPeripheralManager!
     private var messageCharacteristic: CBMutableCharacteristic?
+    // 关键修复：跟踪已订阅的 Central 列表
+    private var subscribedCentrals: Set<CBCentral> = []
 
     override init() {
         super.init()
@@ -94,8 +96,33 @@ final class BluetoothPeripheralManager: NSObject, ObservableObject {
     }
 
     func notify(_ data: Data) {
-        guard let characteristic = messageCharacteristic else { return }
-        _ = peripheral.updateValue(data, for: characteristic, onSubscribedCentrals: nil)
+        guard let characteristic = messageCharacteristic else {
+            NSLog("❌ BluetoothPeripheralManager: 无法发送通知，特征值未设置")
+            return
+        }
+        
+        NSLog("📤 BluetoothPeripheralManager: 准备发送通知 - 大小: \(data.count) 字节, 订阅数: \(subscribedCentrals.count)")
+        
+        // 关键修复：向所有已订阅的 Central 发送通知
+        if subscribedCentrals.isEmpty {
+            NSLog("⚠️ BluetoothPeripheralManager: 没有订阅的 Central，通知可能无法发送")
+            // 仍然尝试发送（可能在订阅确认之前）
+            let success = peripheral.updateValue(data, for: characteristic, onSubscribedCentrals: nil)
+            if !success {
+                NSLog("❌ BluetoothPeripheralManager: 通知发送失败（队列满或无订阅者）")
+            } else {
+                NSLog("⚠️ BluetoothPeripheralManager: 通知已发送（但没有订阅者记录）")
+            }
+        } else {
+            // 向所有已订阅的 Central 发送
+            let centralsArray = Array(subscribedCentrals)
+            let success = peripheral.updateValue(data, for: characteristic, onSubscribedCentrals: centralsArray)
+            if success {
+                NSLog("✅ BluetoothPeripheralManager: 通知已发送给 \(subscribedCentrals.count) 个订阅的 Central")
+            } else {
+                NSLog("⚠️ BluetoothPeripheralManager: 通知发送失败（可能是队列满），但有 \(subscribedCentrals.count) 个订阅者")
+            }
+        }
     }
 
     private func setupService() {
@@ -158,16 +185,38 @@ extension BluetoothPeripheralManager: CBPeripheralManagerDelegate {
     nonisolated func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
         for request in requests {
             if let value = request.value {
+                let centralId = request.central.identifier
+                let dataSize = value.count
+                NSLog("📥 BluetoothPeripheralManager: 收到写入数据 - 来源: \(centralId.uuidString.prefix(8)), 大小: \(dataSize) 字节")
+                
                 Task { @MainActor [weak self] in
                     self?.receivedWriteSubject.send(value)
+                    NSLog("✅ BluetoothPeripheralManager: 数据已转发给 ChannelManager")
                 }
+            } else {
+                NSLog("⚠️ BluetoothPeripheralManager: 收到空写入请求")
             }
             peripheral.respond(to: request, withResult: .success)
         }
     }
 
     nonisolated func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
-        // Ready to push notifications
+        // 关键修复：记录已订阅的 Central
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            self.subscribedCentrals.insert(central)
+            NSLog("✅ BluetoothPeripheralManager: Central 已订阅通知 - \(central.identifier.uuidString.prefix(8))，当前订阅数: \(self.subscribedCentrals.count)")
+            NSLog("✅ BluetoothPeripheralManager: 现在可以向 \(self.subscribedCentrals.count) 个 Central 发送通知了！")
+        }
+    }
+    
+    nonisolated func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
+        // 移除取消订阅的 Central
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            self.subscribedCentrals.remove(central)
+            NSLog("❌ BluetoothPeripheralManager: Central 已取消订阅 - \(central.identifier.uuidString.prefix(8))，当前订阅数: \(self.subscribedCentrals.count)")
+        }
     }
 }
 

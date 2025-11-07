@@ -19,6 +19,7 @@ struct ChatView: View {
     @State private var toastText: String = "已发送"
     @State private var pendingReport: Message? = nil
     @State private var pickerItem: PhotosPickerItem? = nil
+    @State private var videoPickerItem: PhotosPickerItem? = nil
     @State private var isLongPressingVoice: Bool = false
     @State private var dragOffset: CGFloat = 0
     @FocusState private var isInputFocused: Bool
@@ -245,6 +246,41 @@ struct ChatView: View {
             }
             pickerItem = nil
         }
+        .task(id: videoPickerItem) {
+            guard let item = videoPickerItem else { return }
+            
+            // 尝试加载视频数据
+            do {
+                // 首先尝试作为URL加载（视频文件通常很大，作为URL更高效）
+                if let videoURL = try? await item.loadTransferable(type: URL.self),
+                   let videoData = try? Data(contentsOf: videoURL) {
+                    // 从URL加载数据成功
+                    // 尝试生成缩略图
+                    var thumbnail: Data? = nil
+                    var duration: Int? = nil
+                    
+                    // 使用 AVFoundation 生成缩略图（如果需要）
+                    // 这里简化处理，实际可以使用 AVAssetImageGenerator
+                    
+                    // 发送视频
+                    viewModel.sendVideo(videoData, thumbnail: thumbnail, duration: duration)
+                    toastText = "视频已发送"
+                    showToast = true
+                } else if let videoData = try? await item.loadTransferable(type: Data.self) {
+                    // Fallback: 直接加载Data
+                    viewModel.sendVideo(videoData, thumbnail: nil, duration: nil)
+                    toastText = "视频已发送"
+                    showToast = true
+                } else {
+                    toastText = "视频加载失败，请确保视频文件未损坏"
+                    showToast = true
+                }
+            } catch {
+                toastText = "视频处理失败: \(error.localizedDescription)"
+                showToast = true
+            }
+            videoPickerItem = nil
+        }
         .sheet(isPresented: $showEmojiPicker) {
             EmojiPickerView { emoji in
                 viewModel.inputText.append(emoji)
@@ -264,17 +300,19 @@ struct ChatView: View {
     
     private var inputBar: some View {
         VStack(spacing: 0) {
-            // Recording indicator (when recording)
+            // 录音时的UI（完全替换输入栏）- 参考设计图
             if viewModel.voiceService.isRecording {
-                recordingIndicator
-            }
-            
-            HStack(spacing: 8) {
-                // Attachment button (left) - Telegram style paperclip
-                if !viewModel.voiceService.isRecording {
+                recordingVoiceUI
+            } else {
+                // 正常的输入栏
+                HStack(spacing: 8) {
+                    // Attachment button (left) - Telegram style paperclip
                     Menu {
                         PhotosPicker(selection: $pickerItem, matching: .images) {
                             Label("照片", systemImage: "photo")
+                        }
+                        PhotosPicker(selection: $videoPickerItem, matching: .videos) {
+                            Label("视频", systemImage: "video")
                         }
                         Button(action: { showEmojiPicker = true }) {
                             Label("表情", systemImage: "face.smiling")
@@ -285,97 +323,96 @@ struct ChatView: View {
                             .foregroundStyle(Color(.secondaryLabel))
                             .frame(width: 44, height: 44)
                     }
-                }
-                
-                // Voice record button (hold to record)
-                voiceRecordButton
-                
-                // Text input field - Telegram style (always visible)
-                HStack(spacing: 6) {
-                    TextField("Message", text: $viewModel.inputText, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 16))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color(.systemGray6))
-                        .cornerRadius(20)
-                        .lineLimit(1...5)
-                        .focused($isInputFocused)
-                        .submitLabel(.send)
-                        .onSubmit {
-                            // 回车发送消息
-                            let text = viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !text.isEmpty else { return }
-                            viewModel.send()
-                            toastText = "已发送"
-                            showToast = true
-                            // 保持焦点，方便连续输入
-                        }
                     
-                    // Show send button when text exists, otherwise show voice button
-                    if !viewModel.inputText.isEmpty && !viewModel.voiceService.isRecording {
-                        Button(action: {
-                            let text = viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !text.isEmpty else { return }
-                            viewModel.send()
-                            toastText = "已发送"
-                            showToast = true
-                            // 保持焦点，方便连续输入
-                        }) {
-                            Image(systemName: "paperplane.fill")
-                                .font(.system(size: 16))
-                                .foregroundStyle(.white)
-                                .frame(width: 32, height: 32)
-                                .background(Color.blue)
-                                .clipShape(Circle())
-                        }
-                    } else if !viewModel.voiceService.isRecording {
-                        // Voice button with LongPressGesture - Telegram style
-                        Button(action: {
-                            // 空操作，防止与手势冲突
-                        }) {
-                            Image(systemName: "mic.fill")
-                                .font(.system(size: 20))
-                                .foregroundStyle(Color(.secondaryLabel))
-                                .frame(width: 36, height: 36)
-                        }
-                        .highPriorityGesture(
-                            LongPressGesture(minimumDuration: 0.2)
-                                .onEnded { _ in
-                                    guard !isLongPressingVoice else { return }
-                                    isLongPressingVoice = true
-                                    Haptics.light()
-                                    viewModel.startVoiceRecord()
-                                }
-                                .sequenced(before: DragGesture(minimumDistance: 0)
-                                    .onChanged { value in
-                                        guard isLongPressingVoice else { return }
-                                        let dragDistance = abs(value.translation.height)
-                                        if dragDistance > 80 {
-                                            // Cancel if dragged up significantly
-                                            viewModel.cancelVoiceRecord()
+                    // Text input field - Telegram style
+                    HStack(spacing: 6) {
+                        TextField("Message", text: $viewModel.inputText, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 16))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color(.systemGray6))
+                            .cornerRadius(20)
+                            .lineLimit(1...5)
+                            .focused($isInputFocused)
+                            .submitLabel(.send)
+                            .onSubmit {
+                                // 回车发送消息
+                                let text = viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !text.isEmpty else { return }
+                                viewModel.send()
+                                toastText = "已发送"
+                                showToast = true
+                                // 保持焦点，方便连续输入
+                            }
+                        
+                        // Show send button when text exists, otherwise show voice button
+                        if !viewModel.inputText.isEmpty {
+                            Button(action: {
+                                let text = viewModel.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !text.isEmpty else { return }
+                                viewModel.send()
+                                toastText = "已发送"
+                                showToast = true
+                            }) {
+                                Image(systemName: "paperplane.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 32, height: 32)
+                                    .background(Color.blue)
+                                    .clipShape(Circle())
+                            }
+                        } else {
+                            // Voice button with LongPressGesture - Telegram style
+                            Button(action: {
+                                // 空操作，防止与手势冲突
+                            }) {
+                                Image(systemName: "mic.fill")
+                                    .font(.system(size: 20))
+                                    .foregroundStyle(Color(.secondaryLabel))
+                                    .frame(width: 36, height: 36)
+                            }
+                            .highPriorityGesture(
+                                LongPressGesture(minimumDuration: 0.2)
+                                    .onEnded { _ in
+                                        guard !isLongPressingVoice else { return }
+                                        isLongPressingVoice = true
+                                        Haptics.light()
+                                        viewModel.startVoiceRecord()
+                                    }
+                                    .sequenced(before: DragGesture(minimumDistance: 0)
+                                        .onChanged { value in
+                                            guard isLongPressingVoice else { return }
+                                            let dragDistance = abs(value.translation.height)
+                                            dragOffset = value.translation.height
+                                            
+                                            if dragDistance > 80 {
+                                                // 拖动距离超过阈值，显示取消状态
+                                                if !viewModel.voiceService.isRecording || isLongPressingVoice {
+                                                    // 保持录音状态，但提示可以取消
+                                                }
+                                            }
+                                        }
+                                        .onEnded { value in
+                                            guard isLongPressingVoice else { return }
                                             isLongPressingVoice = false
-                                            Haptics.warning()
+                                            dragOffset = 0
+                                            
+                                            let dragDistance = abs(value.translation.height)
+                                            if dragDistance > 80 {
+                                                viewModel.cancelVoiceRecord()
+                                                Haptics.warning()
+                                            } else {
+                                                viewModel.stopVoiceRecord()
+                                            }
                                         }
-                                    }
-                                    .onEnded { value in
-                                        guard isLongPressingVoice else { return }
-                                        isLongPressingVoice = false
-                                        let dragDistance = abs(value.translation.height)
-                                        if dragDistance > 80 {
-                                            viewModel.cancelVoiceRecord()
-                                        } else {
-                                            viewModel.stopVoiceRecord()
-                                        }
-                                    }
-                                )
-                        )
+                                    )
+                            )
+                        }
                     }
-                }
-                .frame(maxWidth: .infinity)
-                
-                // Camera button (right) - Telegram style
-                if !viewModel.voiceService.isRecording {
+                    .frame(maxWidth: .infinity)
+                    
+                    // Camera button (right) - Telegram style
                     PhotosPicker(selection: $pickerItem, matching: .images) {
                         Image(systemName: "camera.fill")
                             .font(.system(size: 20))
@@ -384,58 +421,148 @@ struct ChatView: View {
                             .contentShape(Rectangle())
                     }
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 8)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 8)
-            .background(Color(.systemBackground))
         }
+        .background(Color(.systemBackground))
         .overlay(Divider(), alignment: .top)
     }
     
-    private var voiceRecordButton: some View {
-        Group {
-            if viewModel.voiceService.isRecording {
-                Button(action: {
-                    viewModel.stopVoiceRecord()
-                }) {
-                    Image(systemName: "stop.fill")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
-                        .background(Color.red)
-                        .clipShape(Circle())
-                }
-            }
-        }
-    }
+    // MARK: - 录音UI（参考设计图）
     
-    private var recordingIndicator: some View {
-        HStack {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(Color.red)
-                    .frame(width: 8, height: 8)
-                    .opacity(viewModel.voiceService.isRecording ? 1 : 0)
-                    .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: viewModel.voiceService.isRecording)
+    /// 录音时的完整UI - 完全参考设计图
+    private var recordingVoiceUI: some View {
+        HStack(spacing: 16) {
+            // 左侧：红色圆形图标 + 精确时长显示（格式：0:02,84）
+            HStack(spacing: 8) {
+                // 红色圆形录音指示器
+                ZStack {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 44, height: 44)
+                    
+                    // 内部脉冲动画效果
+                    Circle()
+                        .fill(Color.red.opacity(0.3))
+                        .frame(width: 44, height: 44)
+                        .scaleEffect(viewModel.voiceService.isRecording ? 1.3 : 1.0)
+                        .opacity(viewModel.voiceService.isRecording ? 0.6 : 0)
+                        .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: false), value: viewModel.voiceService.isRecording)
+                }
                 
-                Text("录音中 \(Int(viewModel.voiceService.recordingDuration))秒")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                
-                if viewModel.voiceService.recordingDuration >= 55 {
-                    Text("(即将结束)")
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                // 精确时长显示（分钟:秒,毫秒）
+                Text(formatRecordingDuration(viewModel.voiceService.recordingDuration))
+                    .font(.system(size: 16, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.primary)
+            }
+            .offset(x: dragOffset < -60 ? -20 : 0) // 拖动取消时向左移动
+            .opacity(dragOffset < -60 ? 0.5 : 1.0) // 拖动取消时变暗
+            
+            Spacer()
+            
+            // 中间：滑动取消提示（根据拖动状态显示）
+            Group {
+                if dragOffset < -60 {
+                    // 拖动超过阈值，显示取消状态
+                    HStack(spacing: 4) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.red)
+                        Text("Release to cancel")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.red)
+                    }
+                } else {
+                    // 正常状态，显示滑动取消提示
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.left")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Text("Slide to cancel")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .offset(x: dragOffset < -20 ? -abs(dragOffset) * 0.5 : 0) // 拖动时向左移动
+                    .opacity(max(0.4, 1.0 - abs(dragOffset) / 100.0)) // 拖动时逐渐淡出
                 }
             }
+            .animation(.spring(response: 0.2), value: dragOffset)
+            
             Spacer()
-            Text("上滑取消")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            
+            // 右侧：大的蓝色麦克风按钮（激活状态）
+            Button(action: {
+                // 点击停止录音
+                viewModel.stopVoiceRecord()
+                isLongPressingVoice = false
+                dragOffset = 0
+            }) {
+                ZStack {
+                    // 主按钮
+                    Circle()
+                        .fill(dragOffset < -60 ? Color.red : Color.blue) // 拖动取消时变红
+                        .frame(width: 56, height: 56)
+                        .shadow(color: (dragOffset < -60 ? Color.red : Color.blue).opacity(0.4), radius: 8, x: 0, y: 2)
+                    
+                    // 光晕效果
+                    Circle()
+                        .fill((dragOffset < -60 ? Color.red : Color.blue).opacity(0.2))
+                        .frame(width: 56, height: 56)
+                        .scaleEffect(viewModel.voiceService.isRecording ? 1.4 : 1.0)
+                        .opacity(viewModel.voiceService.isRecording ? 0.6 : 0)
+                        .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: false), value: viewModel.voiceService.isRecording)
+                    
+                    // 图标（取消时显示X，否则显示麦克风）
+                    Image(systemName: dragOffset < -60 ? "xmark" : "mic.fill")
+                        .font(.system(size: dragOffset < -60 ? 20 : 24, weight: .medium))
+                        .foregroundStyle(.white)
+                }
+            }
+            .buttonStyle(.plain)
+            .scaleEffect(isLongPressingVoice ? 1.05 : 1.0)
+            .animation(.spring(response: 0.2), value: isLongPressingVoice)
+            .animation(.spring(response: 0.2), value: dragOffset)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(Color(.systemGray6))
+        .padding(.vertical, 12)
+        .background(Color(.systemBackground))
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    guard viewModel.voiceService.isRecording else { return }
+                    dragOffset = value.translation.height // CGSize.height，向上为负值
+                    
+                    // 向上拖动超过阈值时的视觉反馈
+                    if dragOffset < -80 {
+                        Haptics.light()
+                    }
+                }
+                .onEnded { value in
+                    guard viewModel.voiceService.isRecording else { return }
+                    let dragDistance = abs(value.translation.height)
+                    
+                    // 向上拖动超过阈值，取消录音
+                    if dragDistance > 80 && value.translation.height < 0 {
+                        viewModel.cancelVoiceRecord()
+                        isLongPressingVoice = false
+                        Haptics.warning()
+                    } else {
+                        // 正常结束录音（松开或拖动距离不够）
+                        viewModel.stopVoiceRecord()
+                        isLongPressingVoice = false
+                    }
+                    dragOffset = 0
+                }
+        )
+    }
+    
+    /// 格式化录音时长（格式：0:02,84）
+    private func formatRecordingDuration(_ duration: TimeInterval) -> String {
+        let minutes = Int(duration) / 60
+        let seconds = Int(duration) % 60
+        let milliseconds = Int((duration.truncatingRemainder(dividingBy: 1)) * 100)
+        return String(format: "%d:%02d,%02d", minutes, seconds, milliseconds)
     }
     
     // MARK: - Helpers
@@ -717,6 +844,45 @@ private struct MessageBubbleView: View {
                     duration: duration,
                     onPlay: onPlayVoice
                 )
+                .frame(maxWidth: 220) // 限制语音消息气泡宽度
+            case .video(let data, let thumbnail, let duration):
+                // 显示视频缩略图或占位符
+                if let thumbnailData = thumbnail, let thumbnailImage = UIImage(data: thumbnailData) {
+                    VStack(spacing: 4) {
+                        Image(uiImage: thumbnailImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 250, maxHeight: 250)
+                            .cornerRadius(8)
+                            .overlay(
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(size: 40))
+                                    .foregroundStyle(.white.opacity(0.8))
+                            )
+                        if let duration = duration {
+                            Text("🎥 视频 (\(duration)秒)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("🎥 视频")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    // 没有缩略图，显示占位符
+                    VStack(spacing: 8) {
+                        Image(systemName: "video.fill")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 100, height: 100)
+                            .background(Color(.systemGray5))
+                            .cornerRadius(8)
+                        Text("🎥 视频")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         } else if let attachment = message.attachment,
                   let data = Data(base64Encoded: attachment.dataBase64),
@@ -1200,3 +1366,4 @@ private struct ChatViewPreviewWrapper: View {
         .navigationBarHidden(true)
     }
 }
+

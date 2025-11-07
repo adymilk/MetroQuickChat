@@ -96,6 +96,19 @@ final class ChannelManager: ObservableObject {
                 }
                 self.events.send(.channelsUpdated(self.channels))
                 
+                // 关键修复：如果发现的是当前频道的设备，自动连接以确保双向通信
+                if let currentChannel = self.currentChannel, name == currentChannel.name {
+                    // 发现的是同一频道的设备，尝试连接
+                    print("ChannelManager: 🔗 发现同频道设备，自动连接: \(identifier.uuidString.prefix(8)), 频道: \(name)")
+                    
+                    // 避免重复连接（检查是否已连接）
+                    if !self.central.isConnected(to: identifier) {
+                        self.central.connect(to: identifier)
+                    } else {
+                        print("ChannelManager: 设备已连接，跳过: \(identifier.uuidString.prefix(8))")
+                    }
+                }
+                
                 // 检查是否是收藏的频道，如果是则自动尝试加入
                 // 延迟执行，避免与用户手动操作冲突
                 Task { @MainActor [weak self] in
@@ -223,7 +236,35 @@ final class ChannelManager: ObservableObject {
         
         events.send(.joined(channel, selfPeer))
         sendSystemWithNickname("\(selfPeer.nickname) 加入频道", nickname: selfPeer.nickname)
-        if let discoveryId = channel.discoveryId { central.connect(to: discoveryId) }
+        
+        // 关键修复：加入频道后也要开始广播，确保双向通信
+        // 这样其他设备也可以连接到本设备，实现双向消息传输
+        advertiseChannel()
+        
+        // 持续扫描，以便发现和连接同一频道的其他设备
+        central.startScanning()
+        
+        // 连接到房主设备（如果存在且不是自己）
+        if let discoveryId = channel.discoveryId, discoveryId != selfPeer.id {
+            print("ChannelManager: 🔗 尝试连接到房主设备 - \(discoveryId.uuidString.prefix(8))")
+            
+            // 延迟一下，确保扫描到设备
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                // 等待500ms，确保设备已在idToPeripheral中
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                
+                if !self.central.isConnected(to: discoveryId) {
+                    self.central.connect(to: discoveryId)
+                    print("ChannelManager: 连接请求已发送")
+                } else {
+                    print("ChannelManager: 已连接到房主设备")
+                }
+            }
+        } else {
+            print("ChannelManager: 自己是房主，无需连接")
+        }
+        
         startPresenceLoop()
     }
 
@@ -368,6 +409,33 @@ final class ChannelManager: ObservableObject {
         store.appendMessage(message)
     }
 
+    func sendVideo(_ data: Data, thumbnail: Data? = nil, duration: Int? = nil) {
+        guard let channel = currentChannel else { return }
+        
+        // 视频文件可能很大，需要压缩或限制大小
+        // 对于蓝牙传输，建议视频文件不超过5MB
+        let maxSize = 5_000_000
+        var videoData = data
+        
+        // 如果视频太大，尝试压缩（这里简单处理，实际可以调用视频压缩库）
+        if data.count > maxSize {
+            print("ChannelManager: 警告：视频文件过大(\(data.count)字节)，建议压缩后发送")
+            // 实际应用中可以使用 AVAssetExportSession 压缩视频
+        }
+        
+        let message = Message(
+            channelId: channel.id,
+            author: .user(selfPeer.id),
+            nickname: selfPeer.nickname,
+            text: "",
+            messageType: .video(videoData, thumbnail: thumbnail, duration: duration),
+            isOutgoing: true
+        )
+        events.send(.message(message))
+        send(message)
+        store.appendMessage(message)
+    }
+
     func sendVideoThumbnail(_ thumbnail: Data, mime: String = "image/jpeg") {
         guard let channel = currentChannel else { return }
         let attachment = Attachment(kind: .video, mime: mime, dataBase64: thumbnail.base64EncodedString(), thumbnailBase64: nil)
@@ -422,42 +490,83 @@ final class ChannelManager: ObservableObject {
                 if let btMessage = BluetoothMessage.from(message: message, selfPeerId: selfPeer.id) {
                     let data = try encoder.encode(btMessage)
                     let frames = BLEChunker.chunk(data: data)
-                    for frame in frames {
-                        central.send(frame)
-                        peripheral.notify(frame)
+                    NSLog("📤 ChannelManager: 准备发送消息 - 类型: \(btMessage.type), 内容: \(message.displayText.prefix(50)), 分块数: \(frames.count)")
+                    
+                    // 关键修复：检查连接状态
+                    let connectedCount = central.connectedDeviceCount
+                    if connectedCount == 0 {
+                        NSLog("⚠️ ChannelManager: 警告：没有已连接的设备，消息可能无法发送（仅依赖notify）")
+                    } else {
+                        NSLog("📡 ChannelManager: 准备发送消息，当前已连接 \(connectedCount) 个设备")
                     }
+                    
+                    for (index, frame) in frames.enumerated() {
+                        // 关键修复：同时使用 Central 和 Peripheral 模式发送，确保双向通信
+                        // Central 模式：向已连接的设备发送（writeValue）
+                        central.send(frame)
+                        // Peripheral 模式：向订阅的 Central 发送（notify）
+                        peripheral.notify(frame)
+                        
+                        // 对于多块数据，使用RunLoop延迟避免发送过快
+                        if frames.count > 1 && index < frames.count - 1 {
+                            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) // 10ms 延迟
+                        }
+                    }
+                    
+                    NSLog("✅ ChannelManager: 消息发送完成 - 已发送 \(frames.count) 个数据块")
+                } else {
+                    NSLog("❌ ChannelManager: 无法创建 BluetoothMessage")
                 }
             } else {
                 let data = try encoder.encode(payload)
                 // chunk large payloads
                 let frames = BLEChunker.chunk(data: data)
-                for frame in frames {
+                print("ChannelManager: 发送数据 - 分块数: \(frames.count)")
+                
+                for (index, frame) in frames.enumerated() {
                     central.send(frame)
                     peripheral.notify(frame)
+                    
+                    // 对于多块数据，使用RunLoop延迟
+                    if frames.count > 1 && index < frames.count - 1 {
+                        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) // 10ms 延迟
+                    }
                 }
             }
         } catch {
-            events.send(.error("编码失败: \(error.localizedDescription)"))
+            let errorMsg = "编码失败: \(error.localizedDescription)"
+            print("ChannelManager: ❌ \(errorMsg)")
+            events.send(.error(errorMsg))
         }
     }
 
     private func handleIncoming(_ data: Data) {
+        NSLog("📥 ChannelManager: 收到数据 - 大小: \(data.count) 字节")
+        
+        // 尝试重新组装分块数据
         if let joined = BLEChunker.reassemble(buffer: &reassemblyBuffer, incoming: data) {
+            NSLog("📥 ChannelManager: 数据重组成功，总大小: \(joined.count) 字节")
+            
             // Try BluetoothMessage protocol first (new format)
             if let btMessage = try? decoder.decode(BluetoothMessage.self, from: joined),
                let message = btMessage.toMessage(selfPeerId: selfPeer.id) {
+                NSLog("✅ ChannelManager: 成功解析 BluetoothMessage - 类型: \(btMessage.type), 发送者: \(message.nickname)")
                 events.send(.message(message))
                 store.appendMessage(message)
                 return
             }
+            
             // Try legacy Message format
             if let message = try? decoder.decode(Message.self, from: joined) {
+                NSLog("✅ ChannelManager: 成功解析 Message (legacy) - 发送者: \(message.nickname)")
                 events.send(.message(message))
                 store.appendMessage(message)
                 return
             }
+            
             // Try PresenceUpdate
             if let presence = try? decoder.decode(PresenceUpdate.self, from: joined) {
+                NSLog("✅ ChannelManager: 收到 PresenceUpdate - 发送者: \(presence.nickname)")
                 // Update peer location
                 if let idx = peers.firstIndex(where: { $0.id == presence.peerId }) {
                     peers[idx].latitude = presence.latitude
@@ -470,16 +579,24 @@ final class ChannelManager: ObservableObject {
                 events.send(.peersUpdated(peers))
                 return
             }
+            
+            NSLog("⚠️ ChannelManager: 数据重组后无法解析 - 大小: \(joined.count)")
+        } else {
+            NSLog("📥 ChannelManager: 数据分块中，等待更多数据...")
         }
+        
         // Try single-frame BluetoothMessage
         if let btMessage = try? decoder.decode(BluetoothMessage.self, from: data),
            let message = btMessage.toMessage(selfPeerId: selfPeer.id) {
+            NSLog("✅ ChannelManager: 成功解析单帧 BluetoothMessage - 类型: \(btMessage.type), 发送者: \(message.nickname)")
             events.send(.message(message))
             store.appendMessage(message)
             return
         }
+        
         // Try single-frame legacy Message
         if let message = try? decoder.decode(Message.self, from: data) {
+            NSLog("✅ ChannelManager: 成功解析单帧 Message (legacy) - 发送者: \(message.nickname)")
             events.send(.message(message))
             store.appendMessage(message)
             return

@@ -261,6 +261,11 @@ final class ChatViewModel: ObservableObject {
     func sendVideoThumbnail(_ thumb: Data) {
         channelManager.sendVideoThumbnail(thumb)
     }
+    
+    func sendVideo(_ data: Data, thumbnail: Data? = nil, duration: Int? = nil) {
+        channelManager.sendVideo(data, thumbnail: thumbnail, duration: duration)
+        Haptics.light()
+    }
 
     // MARK: - Distance & Bearing
     func distanceText(for peer: Peer) -> String? {

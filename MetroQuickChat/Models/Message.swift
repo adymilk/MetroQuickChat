@@ -67,6 +67,11 @@ public struct Message: Identifiable, Codable, Equatable {
                 return "📷 图片"
             case .voice(_, let duration):
                 return "🎤 语音 (\(duration)秒)"
+            case .video(_, let thumbnail, let duration):
+                if let duration = duration {
+                    return "🎥 视频 (\(duration)秒)"
+                }
+                return "🎥 视频"
             }
         }
         return text

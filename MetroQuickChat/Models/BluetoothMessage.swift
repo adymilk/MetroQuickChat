@@ -67,6 +67,42 @@ struct BluetoothMessage: Codable {
                     nickname: message.nickname,
                     duration: duration
                 )
+            case .video(let data, let thumbnail, let duration):
+                // 对于视频，我们需要将数据、缩略图和时长信息编码
+                // 创建一个包含所有信息的JSON结构
+                var videoDict: [String: String] = [:]
+                videoDict["video"] = data.base64EncodedString()
+                if let thumbnail = thumbnail {
+                    videoDict["thumbnail"] = thumbnail.base64EncodedString()
+                }
+                if let duration = duration {
+                    videoDict["duration"] = String(duration)
+                }
+                
+                // 使用 JSONEncoder 构建JSON（更安全可靠）
+                if let jsonData = try? JSONEncoder().encode(videoDict),
+                   let jsonString = String(data: jsonData, encoding: .utf8) {
+                    return BluetoothMessage(
+                        type: "video",
+                        payload: jsonString.data(using: .utf8)?.base64EncodedString() ?? "",
+                        sender: message.author.userId ?? selfPeerId,
+                        timestamp: message.createdAt,
+                        channelId: channelId,
+                        nickname: message.nickname,
+                        duration: duration
+                    )
+                }
+                
+                // Fallback: 只发送视频数据
+                return BluetoothMessage(
+                    type: "video",
+                    payload: data.base64EncodedString(),
+                    sender: message.author.userId ?? selfPeerId,
+                    timestamp: message.createdAt,
+                    channelId: channelId,
+                    nickname: message.nickname,
+                    duration: duration
+                )
             }
         } else if !message.text.isEmpty {
             // Legacy text message
@@ -104,6 +140,20 @@ struct BluetoothMessage: Codable {
         case "voice":
             if let duration = duration {
                 messageType = .voice(payloadData, duration: duration)
+            }
+        case "video":
+            // 尝试解析JSON格式的视频数据（包含缩略图和时长）
+            if let jsonString = String(data: payloadData, encoding: .utf8),
+               let jsonData = jsonString.data(using: .utf8),
+               let videoDict = try? JSONDecoder().decode([String: String].self, from: jsonData),
+               let videoBase64 = videoDict["video"],
+               let videoData = Data(base64Encoded: videoBase64) {
+                let thumbnail = videoDict["thumbnail"].flatMap { Data(base64Encoded: $0) }
+                let duration = videoDict["duration"].flatMap { Int($0) }
+                messageType = .video(videoData, thumbnail: thumbnail, duration: duration)
+            } else {
+                // Fallback: 直接使用payload作为视频数据
+                messageType = .video(payloadData, thumbnail: nil, duration: duration)
             }
         default:
             return nil

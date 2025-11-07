@@ -37,7 +37,9 @@ struct MessageFileItem: Identifiable {
                 calculatedSize += Int64(data.count)
             case .voice(let data, _):
                 calculatedSize += Int64(data.count)
-            default:
+            case .video(let data, _, _):
+                calculatedSize += Int64(data.count)
+            case .text, .emoji:
                 break
             }
         } else if let attachment = message.attachment {
@@ -56,6 +58,11 @@ struct MessageFileItem: Identifiable {
                 return "图片"
             case .voice(_, let duration):
                 return "语音 (\(duration)秒)"
+            case .video(_, _, let duration):
+                if let duration = duration {
+                    return "视频 (\(duration)秒)"
+                }
+                return "视频"
             case .text(let text), .emoji(let text):
                 return text
             }
@@ -79,6 +86,8 @@ struct MessageFileItem: Identifiable {
                 return .image
             case .voice:
                 return .voice
+            case .video:
+                return .video
             }
         } else if let attachment = attachment {
             switch attachment.kind {

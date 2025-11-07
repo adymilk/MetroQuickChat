@@ -6,11 +6,13 @@ public enum MessageType: Codable, Equatable {
     case emoji(String)
     case image(Data)
     case voice(Data, duration: Int) // Data is m4a audio, duration in seconds
+    case video(Data, thumbnail: Data?, duration: Int?) // Video data, optional thumbnail and duration
     
     private enum CodingKeys: String, CodingKey {
         case type
         case payload
         case duration
+        case thumbnail
     }
     
     public init(from decoder: Decoder) throws {
@@ -47,6 +49,16 @@ public enum MessageType: Codable, Equatable {
             } else {
                 throw DecodingError.dataCorruptedError(forKey: .payload, in: container, debugDescription: "Invalid voice payload")
             }
+        case "video":
+            let base64 = try container.decode(String.self, forKey: .payload)
+            let thumbnailBase64 = try container.decodeIfPresent(String.self, forKey: .thumbnail)
+            let duration = try container.decodeIfPresent(Int.self, forKey: .duration)
+            if let data = Data(base64Encoded: base64) {
+                let thumbnail = thumbnailBase64.flatMap { Data(base64Encoded: $0) }
+                self = .video(data, thumbnail: thumbnail, duration: duration)
+            } else {
+                throw DecodingError.dataCorruptedError(forKey: .payload, in: container, debugDescription: "Invalid video payload")
+            }
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown message type: \(typeString)")
         }
@@ -73,6 +85,15 @@ public enum MessageType: Codable, Equatable {
             try container.encode("voice", forKey: .type)
             try container.encode(data.base64EncodedString(), forKey: .payload)
             try container.encode(duration, forKey: .duration)
+        case .video(let data, let thumbnail, let duration):
+            try container.encode("video", forKey: .type)
+            try container.encode(data.base64EncodedString(), forKey: .payload)
+            if let thumbnail = thumbnail {
+                try container.encode(thumbnail.base64EncodedString(), forKey: .thumbnail)
+            }
+            if let duration = duration {
+                try container.encode(duration, forKey: .duration)
+            }
         }
     }
 }

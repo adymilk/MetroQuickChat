@@ -32,9 +32,12 @@ final class BluetoothCentralManager: NSObject, ObservableObject {
     private let characteristicUUID = CBUUID(string: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
 
     private var central: CBCentralManager!
-    private var discoveredPeripheral: CBPeripheral?
+    private var discoveredPeripheral: CBPeripheral? // 保留用于向后兼容
     private var idToPeripheral: [UUID: CBPeripheral] = [:]
-    private var messageCharacteristic: CBCharacteristic?
+    private var messageCharacteristic: CBCharacteristic? // 保留用于向后兼容
+    // 关键修复：维护多个连接的设备和对应的特征值
+    private var connectedPeripherals: [UUID: CBPeripheral] = [:]
+    private var peripheralCharacteristics: [UUID: CBCharacteristic] = [:]
 
     override init() {
         super.init()
@@ -117,10 +120,47 @@ final class BluetoothCentralManager: NSObject, ObservableObject {
         guard let peripheral = discoveredPeripheral else { return }
         central.cancelPeripheralConnection(peripheral)
     }
+    
+    /// 检查设备是否已连接
+    func isConnected(to identifier: UUID) -> Bool {
+        return connectedPeripherals[identifier] != nil
+    }
+    
+    /// 获取已连接的设备数量
+    var connectedDeviceCount: Int {
+        return connectedPeripherals.count
+    }
 
     func send(_ data: Data) {
-        guard let peripheral = discoveredPeripheral, let characteristic = messageCharacteristic as? CBMutableCharacteristic ?? messageCharacteristic else { return }
-        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+        // 关键修复：向所有连接的设备发送消息
+        var sentCount = 0
+        
+        NSLog("📤 BluetoothCentralManager: 准备发送数据 - 大小: \(data.count) 字节, 已连接设备: \(connectedPeripherals.count), 有特征值设备: \(peripheralCharacteristics.count)")
+        
+        // 先尝试向所有已连接并有特征值的设备发送
+        for (peripheralId, characteristic) in peripheralCharacteristics {
+            if let peripheral = connectedPeripherals[peripheralId] {
+                peripheral.writeValue(data, for: characteristic, type: .withResponse)
+                sentCount += 1
+                NSLog("✅ BluetoothCentralManager: 已发送到设备 - \(peripheralId.uuidString.prefix(8)) (writeValue)")
+            } else {
+                NSLog("⚠️ BluetoothCentralManager: 设备未连接但特征值存在 - \(peripheralId.uuidString.prefix(8))")
+            }
+        }
+        
+        // 向后兼容：如果还没有连接，尝试使用旧的方式
+        if sentCount == 0, let peripheral = discoveredPeripheral, 
+           let characteristic = messageCharacteristic as? CBMutableCharacteristic ?? messageCharacteristic {
+            peripheral.writeValue(data, for: characteristic, type: .withResponse)
+            NSLog("📤 BluetoothCentralManager: 使用旧方式发送消息（向后兼容）")
+            sentCount += 1
+        }
+        
+        if sentCount == 0 {
+            NSLog("❌ BluetoothCentralManager: 警告：没有可用的连接发送消息")
+        } else {
+            NSLog("✅ BluetoothCentralManager: 成功向 \(sentCount) 个设备发送消息")
+        }
     }
 }
 
@@ -211,11 +251,27 @@ extension BluetoothCentralManager: CBCentralManagerDelegate {
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         Task { @MainActor [weak self] in
             guard let self = self else { return }
+            let peripheralId = peripheral.identifier
+            NSLog("✅ BluetoothCentralManager: 设备连接成功 - \(peripheralId.uuidString.prefix(8)), 名称: \(peripheral.name ?? "未知")")
+            
+            // 添加到连接列表
+            self.connectedPeripherals[peripheralId] = peripheral
+            
+            // 更新状态（如果有连接则设为connected）
+            if !self.connectedPeripherals.isEmpty {
+                self.state = .connected
+            }
+            
             self.connectedPeripheralName = peripheral.name
-            self.state = .connected
+            
+            // 向后兼容：更新 discoveredPeripheral
+            self.discoveredPeripheral = peripheral
+            
             peripheral.delegate = self
             peripheral.discoverServices([self.serviceUUID])
             self.connectionEventSubject.send(.connected)
+            
+            NSLog("✅ BluetoothCentralManager: 当前已连接 \(self.connectedPeripherals.count) 个设备，正在发现服务...")
         }
     }
 
@@ -233,8 +289,27 @@ extension BluetoothCentralManager: CBCentralManagerDelegate {
     nonisolated func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         Task { @MainActor [weak self] in
             guard let self = self else { return }
-            self.state = .disconnected(error)
-            self.connectionEventSubject.send(.disconnected(error))
+            let peripheralId = peripheral.identifier
+            print("BluetoothCentralManager: ❌ 设备断开连接 - \(peripheralId.uuidString.prefix(8)), 错误: \(error?.localizedDescription ?? "无")")
+            
+            // 从连接列表中移除
+            self.connectedPeripherals.removeValue(forKey: peripheralId)
+            self.peripheralCharacteristics.removeValue(forKey: peripheralId)
+            
+            // 如果断开的设备是 discoveredPeripheral，清空它
+            if self.discoveredPeripheral?.identifier == peripheralId {
+                self.discoveredPeripheral = nil
+                self.messageCharacteristic = nil
+            }
+            
+            // 更新状态
+            if self.connectedPeripherals.isEmpty {
+                self.state = .disconnected(error)
+                self.connectionEventSubject.send(.disconnected(error))
+            } else {
+                print("BluetoothCentralManager: 仍有 \(self.connectedPeripherals.count) 个设备连接中")
+            }
+            
             // Auto-reconnect
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             self.startScanning()
@@ -244,30 +319,78 @@ extension BluetoothCentralManager: CBCentralManagerDelegate {
 
 extension BluetoothCentralManager: CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        guard error == nil else { return }
-        guard let services = peripheral.services else { return }
+        guard error == nil else {
+            NSLog("❌ BluetoothCentralManager: 发现服务失败 - \(peripheral.identifier.uuidString.prefix(8)): \(error?.localizedDescription ?? "未知")")
+            return
+        }
+        guard let services = peripheral.services else {
+            NSLog("⚠️ BluetoothCentralManager: 未找到服务 - \(peripheral.identifier.uuidString.prefix(8))")
+            return
+        }
         Task { @MainActor [weak self] in
             guard let self = self else { return }
+            NSLog("🔍 BluetoothCentralManager: 发现 \(services.count) 个服务，正在查找特征值...")
             for service in services where service.uuid == self.serviceUUID {
                 peripheral.discoverCharacteristics([self.characteristicUUID], for: service)
+                NSLog("🔍 BluetoothCentralManager: 正在发现特征值 - \(service.uuid)")
             }
         }
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        guard error == nil else { return }
-        guard let characteristics = service.characteristics else { return }
+        guard error == nil else {
+            NSLog("❌ BluetoothCentralManager: 发现特征值失败 - \(peripheral.identifier.uuidString.prefix(8)): \(error?.localizedDescription ?? "未知错误")")
+            return
+        }
+        guard let characteristics = service.characteristics else {
+            NSLog("⚠️ BluetoothCentralManager: 未找到特征值 - \(peripheral.identifier.uuidString.prefix(8))")
+            return
+        }
         Task { @MainActor [weak self] in
             guard let self = self else { return }
+            let peripheralId = peripheral.identifier
+            NSLog("🔍 BluetoothCentralManager: 发现 \(characteristics.count) 个特征值 - \(peripheralId.uuidString.prefix(8))")
+            
             for characteristic in characteristics where characteristic.uuid == self.characteristicUUID {
+                // 关键修复：为每个 peripheral 保存独立的 characteristic
+                self.peripheralCharacteristics[peripheralId] = characteristic
+                
+                // 向后兼容：更新 messageCharacteristic
                 self.messageCharacteristic = characteristic
+                
+                // 订阅通知
+                NSLog("📡 BluetoothCentralManager: 正在订阅设备通知 - \(peripheralId.uuidString.prefix(8))")
                 peripheral.setNotifyValue(true, for: characteristic)
             }
         }
     }
 
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        // 关键修复：确认订阅状态
+        let peripheralId = peripheral.identifier
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            if let error = error {
+                NSLog("❌ BluetoothCentralManager: 订阅通知失败 - \(peripheralId.uuidString.prefix(8)), 错误: \(error.localizedDescription)")
+                // 移除特征值，因为订阅失败
+                self.peripheralCharacteristics.removeValue(forKey: peripheralId)
+            } else {
+                if characteristic.isNotifying {
+                    NSLog("✅ BluetoothCentralManager: 订阅通知成功 - \(peripheralId.uuidString.prefix(8))，现在可以接收消息了！")
+                    NSLog("✅ BluetoothCentralManager: 连接状态总结 - 已连接: \(self.connectedPeripherals.count) 个设备, 有特征值: \(self.peripheralCharacteristics.count) 个")
+                } else {
+                    NSLog("⚠️ BluetoothCentralManager: 已取消订阅通知 - \(peripheralId.uuidString.prefix(8))")
+                    self.peripheralCharacteristics.removeValue(forKey: peripheralId)
+                }
+            }
+        }
+    }
+    
     nonisolated func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard error == nil else { return }
+        guard error == nil else {
+            NSLog("❌ BluetoothCentralManager: 接收数据错误 - \(peripheral.identifier.uuidString.prefix(8)): \(error?.localizedDescription ?? "未知")")
+            return
+        }
         guard let value = characteristic.value else { return }
         Task { @MainActor [weak self] in
             self?.incomingDataSubject.send(value)
